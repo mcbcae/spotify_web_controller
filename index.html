@@ -1,19 +1,3 @@
-<?PHP
-	if ((empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === "off") && $_SERVER['HTTP_HOST'] !== "localhost:8000" && $_SERVER['HTTP_HOST'] !== "127.0.0.1:8000") {
-		$location = 'https://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
-		header('HTTP/1.1 301 Moved Permanently');
-		header('Location: ' . $location);
-		exit();
-	}
-	session_start();
-	if (!isset($_SESSION["state"])) {
-		$_SESSION["state"] = rand(100, 999);
-	}
-	else if (isset($_GET["state"]) && intval($_GET["state"]) != $_SESSION["state"]) {
-		http_response_code(409);
-		exit();
-	}
-?>
 <!DOCTYPE html>
 <html>
 	<head>
@@ -36,14 +20,30 @@
 		<meta name="screen-orientation" content="portrait">
 
 		<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
-		<style><?php readfile("styles.css"); ?></style>
-		<script>var state = <?PHP echo $_SESSION["state"]; ?>;</script>
-		<script><?php readfile("helpers.js"); ?></script>
+		<link rel="stylesheet" href="styles.css">
+		<script>
+			// Client-side state generation (replaces PHP session)
+			var state = sessionStorage.getItem("spotify_state_v2");
+			if (!state) {
+				state = Math.floor(Math.random() * 900) + 100;
+				sessionStorage.setItem("spotify_state_v2", state);
+			}
+			// Security check for redirect callback
+			var urlParams = new URLSearchParams(window.location.search);
+			if (urlParams.has('state')) {
+				var returnedState = parseInt(urlParams.get('state'));
+				if (returnedState != state) {
+					alert("Security Error: State mismatch. Please try signing in again.");
+					window.location.href = window.location.origin + window.location.pathname;
+				}
+			}
+		</script>
+		<script src="helpers.js"></script>
 		<script type="application/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
-		<script><?php readfile("page-handler.js"); ?></script>
+		<script src="page-handler.js"></script>
 		<script type="application/javascript" src="vibrant.min.js"></script>
 		<script type="application/javascript" src="spotify-web-api.js"></script>
-		<script><?php readfile("spotify-handler.js"); ?></script>
+		<script src="spotify-handler.js"></script>
 	</head>
 	<body onload="spotifyHandler.init();">
 		<div class="page active" id="loadingpage">
@@ -155,7 +155,7 @@
 				</div>
 			</div>
 		</div>
-		<script><?PHP readfile("progressbar.js"); ?></script>
+		<script src="progressbar.js"></script>
 		<script>
 			window.onbeforeunload = function(e) {
 				pageHandler.showPage("loadingpage");

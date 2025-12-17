@@ -1,5 +1,7 @@
 var spotifyHandler = {
 	scopes: ["user-read-private", "user-read-currently-playing", "user-read-playback-state", "user-modify-playback-state", "user-read-recently-played", "user-library-read", "user-library-modify", "playlist-read-private", "playlist-read-collaborative"],
+	clientId: "6829ff1daee844e7b269faad8c34e673",
+	redirectUri: window.location.origin + window.location.pathname,
 	accessToken: null,
 	expires: -1,
 	api: new SpotifyWebApi(),
@@ -10,28 +12,91 @@ var spotifyHandler = {
 	lastQueueId: "null2",
 	lastPlaybackStatus: {},
 
-	signIn: function() {
-		window.location.href = "https://accounts.spotify.com/authorize?client_id=44219fb334174bc6b2c634d8f9e4f6eb&response_type=token&redirect_uri="+encodeURIComponent(window.location.origin + window.location.pathname)+"&scope="+spotifyHandler.scopes.join("%20")+"&show_dialog=false&state="+state;
+	signIn: async function () {
+		try {
+			// Basic support check
+			var useFallback = false;
+			if (!window.crypto || !window.crypto.subtle) {
+				console.warn("Web Crypto API not returned, falling back to pure JS SHA-256");
+				useFallback = true;
+			}
+			var codeVerifier = spotifyHandler.generateRandomString(128);
+			var codeChallenge = await spotifyHandler.sha256(codeVerifier, useFallback);
+			codeChallenge = spotifyHandler.base64urlencode(codeChallenge);
+
+			window.localStorage.setItem('code_verifier', codeVerifier);
+
+			var url = "https://accounts.spotify.com/authorize?client_id=" + spotifyHandler.clientId +
+				"&response_type=code" +
+				"&redirect_uri=" + encodeURIComponent(spotifyHandler.redirectUri) +
+				"&scope=" + spotifyHandler.scopes.join("%20") +
+				"&show_dialog=false" +
+				"&code_challenge_method=S256" +
+				"&code_challenge=" + codeChallenge +
+				"&state=" + state;
+
+			window.location.href = url;
+		} catch (e) {
+			alert("Sign-in error: " + e.message);
+			console.error(e);
+		}
 	},
 
-	checkAccessToken: function() {
+	generateRandomString: function (length) {
+		var text = "";
+		var possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+		for (var i = 0; i < length; i++) {
+			text += possible.charAt(Math.floor(Math.random() * possible.length));
+		}
+		return text;
+	},
+
+	sha256: function (plain, useFallback) {
+		if (useFallback) {
+			// Use the synchronous pure JS sha256 from helpers.js
+			return Promise.resolve(window.sha256(plain));
+		}
+		const encoder = new TextEncoder();
+		const data = encoder.encode(plain);
+		return window.crypto.subtle.digest('SHA-256', data);
+	},
+
+	base64urlencode: function (a) {
+		return btoa(String.fromCharCode.apply(null, new Uint8Array(a)))
+			.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+	},
+
+	checkAccessToken: function () {
 		if ((new Date().getTime() + 25000) >= spotifyHandler.expires) {
 			console.warn("Spotify Access Token has expired! Refreshing page to refresh the access token...");
 			window.location.href = window.location.origin + window.location.pathname;
 		}
 	},
 
-	setCurrentlyPlaying: function() {
+	setCurrentlyPlaying: function () {
 		if (!document.hidden) {
-			spotifyHandler.api.getMyCurrentPlaybackState({}, function(err, data) {
+			spotifyHandler.api.getMyCurrentPlaybackState({}, function (err, data) {
 				if (err) {
 					console.error(err);
 				}
-				else if (data != undefined && typeof data != "string" && data.item != null) {
+				else if (data != undefined && typeof data != "string" && (data.item != null || data.is_playing)) {
 					// console.log(data);
 					spotifyHandler.lastPlaybackStatus = data;
 					if (pageHandler.shown == "discoverpage") {
 						pageHandler.showPage("playerpage");
+					}
+					if (data.item == null) {
+						// Graceful fallback for when item is null (e.g. initial buffering or private session)
+						// We mock an empty item to prevent crashes, or we could just skip updating metadata
+						data.item = {
+							id: "unknown",
+							uri: "spotify:track:unknown",
+							name: "Unknown Track",
+							artists: [{ name: "Unknown Artist" }],
+							album: { images: [] },
+							duration_ms: 0,
+							is_local: false
+						};
 					}
 					if (data.item.id == null) {
 						data.item.id = data.item.uri.split(":").pop();
@@ -56,7 +121,7 @@ var spotifyHandler = {
 						if (data.context != null) {
 							switch (data.context.type) {
 								case "playlist": {
-									spotifyHandler.api.getPlaylist(data.context.uri.split(":").pop(), {fields: "name,id"}, function(err, data) {
+									spotifyHandler.api.getPlaylist(data.context.uri.split(":").pop(), { fields: "name,id" }, function (err, data) {
 										if (err) {
 											console.error(err);
 										}
@@ -71,7 +136,7 @@ var spotifyHandler = {
 									break;
 								}
 								case "album": {
-									spotifyHandler.api.getAlbum(data.context.uri.split(":").pop(), {}, function(err, data) {
+									spotifyHandler.api.getAlbum(data.context.uri.split(":").pop(), {}, function (err, data) {
 										if (err) {
 											console.error(err);
 										}
@@ -86,7 +151,7 @@ var spotifyHandler = {
 									break;
 								}
 								case "artist": {
-									spotifyHandler.api.getArtist(data.context.uri.split(":").pop(), {}, function(err, data) {
+									spotifyHandler.api.getArtist(data.context.uri.split(":").pop(), {}, function (err, data) {
 										if (err) {
 											console.error(err);
 										}
@@ -116,13 +181,12 @@ var spotifyHandler = {
 							spotifyHandler.fillQueue("library", "library");
 							console.log("No context for currently playing track, assuming library is being played");
 						}
-						if ('mediaSession' in navigator)
-						{
+						if ('mediaSession' in navigator) {
 							navigator.mediaSession.playbackState = "playing";
 							var tempArtwork = [];
 							for (var i = 0; i < data.item.album.images.length; i++) {
 								tempArtwork[i] = {
-									sizes: data.item.album.images[i].width+"x"+data.item.album.images[i].height,
+									sizes: data.item.album.images[i].width + "x" + data.item.album.images[i].height,
 									src: data.item.album.images[i].url,
 									type: "image/jpeg"
 								};
@@ -148,7 +212,7 @@ var spotifyHandler = {
 					else {
 						spotifyHandler.dom.volumebar.disabled = true;
 					}
-					
+
 					if (data.is_playing) {
 						spotifyHandler.dom.playPauseButton.title = "Pause";
 						spotifyHandler.dom.playPauseButton.innerHTML = "&#xe035;";
@@ -161,7 +225,7 @@ var spotifyHandler = {
 					if (!data.item.is_local) {
 						spotifyHandler.dom.likeButton.disabled = false;
 						spotifyHandler.dom.likeButton.style.display = "inline-block";
-						spotifyHandler.api.containsMySavedTracks([data.item.id], {}, function(err, data) {
+						spotifyHandler.api.containsMySavedTracks([data.item.id], {}, function (err, data) {
 							if (err) {
 								console.error(err);
 							}
@@ -215,7 +279,7 @@ var spotifyHandler = {
 				else {
 					console.log("No instances of Spotify found to control.");
 					if (spotifyHandler.lastTrackId != "null2") {
-						setTimeout(function() {
+						setTimeout(function () {
 							spotifyHandler.refreshDevices();
 						}, 500);
 					}
@@ -227,7 +291,7 @@ var spotifyHandler = {
 		}
 	},
 
-	fixArtSize: function() {
+	fixArtSize: function () {
 		var maxHeight = document.getElementById("below-art-holder").offsetTop - 42 - 48;
 		var maxWidth = window.innerWidth - 48;
 		if (maxHeight < maxWidth) {
@@ -238,14 +302,14 @@ var spotifyHandler = {
 		}
 	},
 
-	updateTimes: function(prog, dur) {
+	updateTimes: function (prog, dur) {
 		spotifyHandler.dom.playbackTime.innerHTML = formatSeconds(prog);
 		spotifyHandler.dom.durationTime.innerHTML = formatSeconds(dur);
 	},
 
-	refreshDevices: function() {
+	refreshDevices: function () {
 		if (!document.hidden) {
-			spotifyHandler.api.getMyDevices(function(err, data) {
+			spotifyHandler.api.getMyDevices(function (err, data) {
 				if (err) {
 					console.error(err);
 					spotifyHandler.dom.deviceList.innerHTML = "";
@@ -265,9 +329,9 @@ var spotifyHandler = {
 							}
 						}
 						else {
-							tempList += '<li class="devicelist-item" onclick="spotifyHandler.transferPlayback(\''+data.devices[i].id+'\')"><span class="devicelist-icon material-icons">'+getDeviceIcon(data.devices[i].type.toLowerCase())+'</span><span class="devicelist-name">'+data.devices[i].name+'</span></li>';
+							tempList += '<li class="devicelist-item" onclick="spotifyHandler.transferPlayback(\'' + data.devices[i].id + '\')"><span class="devicelist-icon material-icons">' + getDeviceIcon(data.devices[i].type.toLowerCase()) + '</span><span class="devicelist-name">' + data.devices[i].name + '</span></li>';
 						}
-						tempListDis += '<li class="devicelist-item" onclick="spotifyHandler.startPlaySession(\''+data.devices[i].id+'\')"><span class="devicelist-icon material-icons">'+getDeviceIcon(data.devices[i].type.toLowerCase())+'</span><span class="devicelist-name">'+data.devices[i].name+'</span></li>';
+						tempListDis += '<li class="devicelist-item" onclick="spotifyHandler.startPlaySession(\'' + data.devices[i].id + '\')"><span class="devicelist-icon material-icons">' + getDeviceIcon(data.devices[i].type.toLowerCase()) + '</span><span class="devicelist-name">' + data.devices[i].name + '</span></li>';
 					}
 					spotifyHandler.dom.deviceList.innerHTML = tempList;
 					spotifyHandler.dom.discoverList.innerHTML = tempListDis;
@@ -292,8 +356,8 @@ var spotifyHandler = {
 		}
 	},
 
-	setVolume: function(newVolume, volumebarOnly) {
-		spotifyHandler.dom.volumebar.style.background = 'linear-gradient(to right, #1DB954 0%, #1DB954 '+newVolume+'%, #353942 '+newVolume+'%, #353942 100%)';
+	setVolume: function (newVolume, volumebarOnly) {
+		spotifyHandler.dom.volumebar.style.background = 'linear-gradient(to right, #1DB954 0%, #1DB954 ' + newVolume + '%, #353942 ' + newVolume + '%, #353942 100%)';
 		if (spotifyHandler.dom.volumebar.value != newVolume && !changingVolume) {
 			spotifyHandler.dom.volumebar.value = newVolume;
 		}
@@ -303,17 +367,17 @@ var spotifyHandler = {
 	},
 
 	transferringPlayback: false,
-	transferPlayback: function(deviceId) {
+	transferPlayback: function (deviceId) {
 		if (!spotifyHandler.transferringPlayback) {
 			spotifyHandler.transferringPlayback = true;
-			spotifyHandler.api.transferMyPlayback([deviceId], {}, function(err, data) {
+			spotifyHandler.api.transferMyPlayback([deviceId], {}, function (err, data) {
 				if (err) {
 					console.error(err);
 					spotifyHandler.transferringPlayback = false;
 				}
 				else {
 					console.log("Moved playback");
-					setTimeout(function() {
+					setTimeout(function () {
 						spotifyHandler.refreshDevices();
 						spotifyHandler.transferringPlayback = false;
 					}, 500);
@@ -325,9 +389,8 @@ var spotifyHandler = {
 	fetchingQueue: false,
 	queueTotal: undefined,
 	queueOffset: 0,
-	fillQueue: function(type, id) {
-		if (id != null)
-		{
+	fillQueue: function (type, id) {
+		if (id != null) {
 			if (spotifyHandler.lastQueueId != id) {
 				spotifyHandler.dom.queueButton.disabled = true;
 				spotifyHandler.lastQueueId = id;
@@ -349,15 +412,15 @@ var spotifyHandler = {
 		}
 	},
 
-	fetchQueueTracks: function(type, id, offset) {
+	fetchQueueTracks: function (type, id, offset) {
 		if (spotifyHandler.fetchingQueue != true) {
 			if (type == "album") {
 				spotifyHandler.fetchingQueue = true;
-				spotifyHandler.api.getAlbumTracks(id, {offset: offset}, spotifyHandler.handleFetchedTracks);
+				spotifyHandler.api.getAlbumTracks(id, { offset: offset }, spotifyHandler.handleFetchedTracks);
 			}
 			else if (type == "playlist") {
 				spotifyHandler.fetchingQueue = true;
-				spotifyHandler.api.getPlaylistTracks(id, {offset: offset}, spotifyHandler.handleFetchedTracks);
+				spotifyHandler.api.getPlaylistTracks(id, { offset: offset }, spotifyHandler.handleFetchedTracks);
 			}
 			else if (type == "artist") {
 				spotifyHandler.fetchingQueue = true;
@@ -365,7 +428,7 @@ var spotifyHandler = {
 			}
 			else if (type == "library" && id == "library") {
 				spotifyHandler.fetchingQueue = true;
-				spotifyHandler.api.getMySavedTracks({offset: offset, limit: 50, market: "from_token"}, spotifyHandler.handleFetchedTracks);
+				spotifyHandler.api.getMySavedTracks({ offset: offset, limit: 50, market: "from_token" }, spotifyHandler.handleFetchedTracks);
 			}
 			else {
 				spotifyHandler.dom.queueButton.disabled = true;
@@ -377,7 +440,7 @@ var spotifyHandler = {
 		}
 	},
 
-	handleFetchedTracks: function(err, data) {
+	handleFetchedTracks: function (err, data) {
 		spotifyHandler.fetchingQueue = false;
 		spotifyHandler.dom.queueButton.disabled = false;
 		if (err) {
@@ -397,13 +460,13 @@ var spotifyHandler = {
 		}
 	},
 
-	createTrackItem: function(tempTrack, doCover, inCurrentContext) {
+	createTrackItem: function (tempTrack, doCover, inCurrentContext) {
 		var trackElem = document.createElement("li");
 		var tempArtists = [];
 		trackElem.className = "queue-item";
 		trackElem.setAttribute("data-uri", tempTrack.uri);
 		if (inCurrentContext) {
-			trackElem.setAttribute("data-context", "spotify:"+spotifyHandler.lastQueueType+":"+spotifyHandler.lastQueueId);
+			trackElem.setAttribute("data-context", "spotify:" + spotifyHandler.lastQueueType + ":" + spotifyHandler.lastQueueId);
 		}
 		else {
 			trackElem.setAttribute("data-context", tempTrack.album.uri);
@@ -413,15 +476,15 @@ var spotifyHandler = {
 		for (var j = 0; j < tempTrack.artists.length; j++) {
 			tempArtists.push(stripTags(tempTrack.artists[j].name));
 		}
-		trackElem.innerHTML = (doCover ? '<div class="queue-item-cover"><img src="'+(tempTrack.album.images.length > 0 ? tempTrack.album.images.pop().url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')+'"></div>': '<div class="queue-item-cover"><span>'+(tempTrack.disc_number > 1 ? tempTrack.disc_number+'-' : '')+tempTrack.track_number+'</span></div>')+'<div class="queue-item-metadata"><div class="queue-item-name">'+stripTags(tempTrack.name)+'</div><div class="queue-item-artist">'+tempArtists.join(', ')+'</div></div>';
+		trackElem.innerHTML = (doCover ? '<div class="queue-item-cover"><img src="' + (tempTrack.album.images.length > 0 ? tempTrack.album.images.pop().url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7') + '"></div>' : '<div class="queue-item-cover"><span>' + (tempTrack.disc_number > 1 ? tempTrack.disc_number + '-' : '') + tempTrack.track_number + '</span></div>') + '<div class="queue-item-metadata"><div class="queue-item-name">' + stripTags(tempTrack.name) + '</div><div class="queue-item-artist">' + tempArtists.join(', ') + '</div></div>';
 		spotifyHandler.dom.queue.appendChild(trackElem);
 		return (trackElem);
 	},
 
-	addQueueTracks: function(tracks, doCover) {
+	addQueueTracks: function (tracks, doCover) {
 		var tempTrack = {};
 		for (var i = 0; i < tracks.length; i++) {
-			
+
 			tempTrack = tracks[i];
 			if ("track" in tempTrack) {
 				tempTrack = tempTrack.track;
@@ -433,7 +496,7 @@ var spotifyHandler = {
 		}
 	},
 
-	playContext: function(contextUri, trackUri) {
+	playContext: function (contextUri, trackUri) {
 		if (trackUri == null) {
 			spotifyHandler.api.play({
 				context_uri: contextUri
@@ -463,13 +526,13 @@ var spotifyHandler = {
 		}
 	},
 
-	startPlaySession: function(deviceId) {
+	startPlaySession: function (deviceId) {
 		spotifyHandler.api.play({
 			device_id: deviceId
-		}, function(err, data) {
+		}, function (err, data) {
 			if (err) {
 				console.error(err);
-				alert("Could not start playback due to an error ("+err.status+"). You'll have to start it yourself, on the device you clicked on.");
+				alert("Could not start playback due to an error (" + err.status + "). You'll have to start it yourself, on the device you clicked on.");
 			}
 		});
 	},
@@ -478,7 +541,7 @@ var spotifyHandler = {
 	playlistsTotal: undefined,
 	playlistsOffset: 0,
 	firstAlbumFetched: false,
-	loadLibrary: function() {
+	loadLibrary: function () {
 		spotifyHandler.dom.library.innerHTML = "";
 		spotifyHandler.dom.library.appendChild(spotifyHandler.createDividerItem("Playlists"));
 		spotifyHandler.playlistsOffset = 0;
@@ -486,11 +549,11 @@ var spotifyHandler = {
 		spotifyHandler.fetchPlaylists(0);
 	},
 
-	fetchPlaylists: function(offset) {
+	fetchPlaylists: function (offset) {
 		if (spotifyHandler.fetchingPlaylists != true) {
 			spotifyHandler.fetchingPlaylists = true;
 			if (offset < spotifyHandler.playlistsTotal || (offset == 0 && spotifyHandler.playlistsTotal == undefined)) {
-				spotifyHandler.api.getUserPlaylists({offset: offset, limit: 50}, spotifyHandler.handleFetchedPlaylists);
+				spotifyHandler.api.getUserPlaylists({ offset: offset, limit: 50 }, spotifyHandler.handleFetchedPlaylists);
 			}
 			else {
 				if (!spotifyHandler.firstAlbumFetched) {
@@ -499,7 +562,7 @@ var spotifyHandler = {
 				}
 				offset = offset - spotifyHandler.playlistsTotal;
 				if (offset >= 0) {
-					spotifyHandler.api.getMySavedAlbums({offset: offset, limit: 50, country: "from_token"}, spotifyHandler.handleFetchedPlaylists);
+					spotifyHandler.api.getMySavedAlbums({ offset: offset, limit: 50, country: "from_token" }, spotifyHandler.handleFetchedPlaylists);
 				}
 			}
 		}
@@ -508,7 +571,7 @@ var spotifyHandler = {
 		}
 	},
 
-	handleFetchedPlaylists: function(err, data) {
+	handleFetchedPlaylists: function (err, data) {
 		spotifyHandler.fetchingPlaylists = false;
 		if (err) {
 			console.error(err);
@@ -527,7 +590,7 @@ var spotifyHandler = {
 		}
 	},
 
-	createPlaylistOrAlbumItem: function(tempData) {
+	createPlaylistOrAlbumItem: function (tempData) {
 		playlistElem = document.createElement("li");
 		playlistElem.className = "queue-item";
 		playlistElem.setAttribute("data-uri", tempData.uri);
@@ -538,11 +601,11 @@ var spotifyHandler = {
 			}
 		}
 		playlistElem.setAttribute("onclick", "spotifyHandler.playContext(this.getAttribute('data-uri'), null); pageHandler.showPage('playerpage');");
-		playlistElem.innerHTML = '<div class="queue-item-cover"><img src="'+(tempData.images.length > 0 ? tempData.images.pop().url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')+'"></div><div class="queue-item-metadata"><div class="queue-item-name">'+stripTags(tempData.name)+'</div><div class="queue-item-artist">'+("artists" in tempData ? tempArtists.join(", ") : 'by '+stripTags(tempData.owner.display_name))+'</div></div>';
+		playlistElem.innerHTML = '<div class="queue-item-cover"><img src="' + (tempData.images.length > 0 ? tempData.images.pop().url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7') + '"></div><div class="queue-item-metadata"><div class="queue-item-name">' + stripTags(tempData.name) + '</div><div class="queue-item-artist">' + ("artists" in tempData ? tempArtists.join(", ") : 'by ' + stripTags(tempData.owner.display_name)) + '</div></div>';
 		return (playlistElem);
 	},
 
-	addPlaylists: function(data) {
+	addPlaylists: function (data) {
 		for (var i = 0; i < data.length; i++) {
 			tempData = data[i];
 			if ("album" in tempData) {
@@ -552,7 +615,7 @@ var spotifyHandler = {
 		}
 	},
 
-	createDividerItem: function(content) {
+	createDividerItem: function (content) {
 		divider = document.createElement("li");
 		divider.className = "queue-item divider";
 		divider.innerHTML = content;
@@ -560,14 +623,13 @@ var spotifyHandler = {
 	},
 
 	searchReq: null,
-	search: function(q) {
+	search: function (q) {
 		if (spotifyHandler.searchReq != null) {
 			spotifyHandler.searchReq.abort();
 		}
-		if (q.trim() != "")
-		{
-			spotifyHandler.searchReq = spotifyHandler.api.search(q.trim(), ["track", "album", "playlist"], {offset: 0, limit: 12, market: "from_token"});
-			spotifyHandler.searchReq.then(function(data) {
+		if (q.trim() != "") {
+			spotifyHandler.searchReq = spotifyHandler.api.search(q.trim(), ["track", "album", "playlist"], { offset: 0, limit: 12, market: "from_token" });
+			spotifyHandler.searchReq.then(function (data) {
 				console.log("Search results are in", data);
 				spotifyHandler.dom.search.innerHTML = "";
 				var anyResults = false;
@@ -593,9 +655,9 @@ var spotifyHandler = {
 					anyResults = true;
 				}
 				if (!anyResults) {
-					spotifyHandler.dom.search.appendChild(spotifyHandler.createDividerItem("No results found for \""+stripTags(q.trim())+"\""));
+					spotifyHandler.dom.search.appendChild(spotifyHandler.createDividerItem("No results found for \"" + stripTags(q.trim()) + "\""));
 				}
-			}, function(err) {
+			}, function (err) {
 				// console.error(err);
 			});
 		}
@@ -604,7 +666,7 @@ var spotifyHandler = {
 		}
 	},
 
-	init: function() {
+	init: function () {
 		document.getElementById("signinbtn").addEventListener("click", spotifyHandler.signIn);
 
 		spotifyHandler.dom.playerPage = document.getElementById("playerpage");
@@ -642,21 +704,21 @@ var spotifyHandler = {
 		spotifyHandler.dom.searchPage = document.getElementById("searchpage");
 		spotifyHandler.dom.searchBar = document.getElementById("searchbar");
 		window.addEventListener("resize", spotifyHandler.fixArtSize);
-		spotifyHandler.dom.artwork.addEventListener("loadstart", function(event) {
+		spotifyHandler.dom.artwork.addEventListener("loadstart", function (event) {
 			spotifyHandler.dom.playerPage.style.background = null;
 			spotifyHandler.dom.themeColor.setAttribute("content", "#1DB954");
 		});
-		spotifyHandler.dom.artwork.addEventListener("load", function(event) {
+		spotifyHandler.dom.artwork.addEventListener("load", function (event) {
 			spotifyHandler.fixArtSize();
 			if (event.target.src.indexOf("data:image/gif;base64") != 0) {
 				var vibrant = new Vibrant(event.target);
 				var swatches = vibrant.swatches();
 				if (swatches.Vibrant != undefined) {
-					spotifyHandler.dom.playerPage.style.background = "linear-gradient(rgba("+swatches.Vibrant.rgb.join(",")+",0.7), #15161A 75%)";
+					spotifyHandler.dom.playerPage.style.background = "linear-gradient(rgba(" + swatches.Vibrant.rgb.join(",") + ",0.7), #15161A 75%)";
 					spotifyHandler.dom.themeColor.setAttribute("content", swatches.Vibrant.getHex());
 				}
 				else if (swatches.Muted != undefined) {
-					spotifyHandler.dom.playerPage.style.background = "linear-gradient(rgba("+swatches.Muted.rgb.join(",")+",0.7), #15161A 75%)";
+					spotifyHandler.dom.playerPage.style.background = "linear-gradient(rgba(" + swatches.Muted.rgb.join(",") + ",0.7), #15161A 75%)";
 					spotifyHandler.dom.themeColor.setAttribute("content", swatches.Muted.getHex());
 				}
 				else {
@@ -670,51 +732,51 @@ var spotifyHandler = {
 				spotifyHandler.dom.themeColor.setAttribute("content", "#1DB954");
 			}
 		});
-		spotifyHandler.dom.playPauseButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.playPauseButton.addEventListener("click", function (event) {
 			spotifyHandler.dom.playPauseButton.disabled = true;
 			if (spotifyHandler.dom.playPauseButton.title == "Pause") {
-				spotifyHandler.api.pause({}, function() {
+				spotifyHandler.api.pause({}, function () {
 					spotifyHandler.dom.playPauseButton.disabled = false;
 					spotifyHandler.dom.playPauseButton.innerHTML = "&#xe038;";
 					spotifyHandler.dom.playPauseButton.title = "Play";
-					setTimeout(function() {
+					setTimeout(function () {
 						spotifyHandler.setCurrentlyPlaying();
 					}, 250);
 				});
 			}
 			else {
-				spotifyHandler.api.play({}, function() {
+				spotifyHandler.api.play({}, function () {
 					spotifyHandler.dom.playPauseButton.disabled = false;
 					spotifyHandler.dom.playPauseButton.innerHTML = "&#xe035;";
 					spotifyHandler.dom.playPauseButton.title = "Pause";
-					setTimeout(function() {
+					setTimeout(function () {
 						spotifyHandler.setCurrentlyPlaying();
 					}, 250);
 				});
 			}
 		});
-		spotifyHandler.dom.nextButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.nextButton.addEventListener("click", function (event) {
 			spotifyHandler.dom.nextButton.disabled = true;
-			spotifyHandler.api.skipToNext({}, function() {
+			spotifyHandler.api.skipToNext({}, function () {
 				spotifyHandler.dom.nextButton.disabled = false;
-				setTimeout(function() {
+				setTimeout(function () {
 					spotifyHandler.setCurrentlyPlaying();
 				}, 250);
 			});
 		});
-		spotifyHandler.dom.previousButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.previousButton.addEventListener("click", function (event) {
 			spotifyHandler.dom.previousButton.disabled = true;
-			spotifyHandler.api.skipToPrevious({}, function() {
+			spotifyHandler.api.skipToPrevious({}, function () {
 				spotifyHandler.dom.previousButton.disabled = false;
-				setTimeout(function() {
+				setTimeout(function () {
 					spotifyHandler.setCurrentlyPlaying();
 				}, 250);
 			});
 		});
-		spotifyHandler.dom.likeButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.likeButton.addEventListener("click", function (event) {
 			spotifyHandler.dom.likeButton.disabled = true;
 			if (spotifyHandler.dom.likeButton.getAttribute("data-liked") == "false") {
-				spotifyHandler.api.addToMySavedTracks([spotifyHandler.lastTrackId], {}, function(err, data) {
+				spotifyHandler.api.addToMySavedTracks([spotifyHandler.lastTrackId], {}, function (err, data) {
 					if (err) {
 						console.error(err);
 					}
@@ -728,7 +790,7 @@ var spotifyHandler = {
 				});
 			}
 			else {
-				spotifyHandler.api.removeFromMySavedTracks([spotifyHandler.lastTrackId], {}, function(err, data) {
+				spotifyHandler.api.removeFromMySavedTracks([spotifyHandler.lastTrackId], {}, function (err, data) {
 					if (err) {
 						console.error(err);
 					}
@@ -742,66 +804,65 @@ var spotifyHandler = {
 				});
 			}
 		});
-		spotifyHandler.dom.devicesButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.devicesButton.addEventListener("click", function (event) {
 			pageHandler.showPage("devicespage");
 		});
-		spotifyHandler.dom.queueButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.queueButton.addEventListener("click", function (event) {
 			pageHandler.showPage("queuepage");
 		});
-		spotifyHandler.dom.shuffleButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.shuffleButton.addEventListener("click", function (event) {
 			spotifyHandler.dom.shuffleButton.disabled = true;
-			spotifyHandler.api.setShuffle(!spotifyHandler.lastPlaybackStatus.shuffle_state, {}, function(err, data) {
+			spotifyHandler.api.setShuffle(!spotifyHandler.lastPlaybackStatus.shuffle_state, {}, function (err, data) {
 				spotifyHandler.dom.shuffleButton.disabled = false;
 				if (err) {
 					console.error(err);
 				}
 				else {
-					setTimeout(function() {
+					setTimeout(function () {
 						spotifyHandler.setCurrentlyPlaying();
 					}, 250);
 				}
 			});
 		});
-		spotifyHandler.dom.repeatButton.addEventListener("click", function(event) {
+		spotifyHandler.dom.repeatButton.addEventListener("click", function (event) {
 			spotifyHandler.dom.repeatButton.disabled = true;
 			var newState = {
 				off: "context",
 				context: "track",
 				track: "off"
 			};
-			spotifyHandler.api.setRepeat(newState[spotifyHandler.lastPlaybackStatus.repeat_state], {}, function(err, data) {
+			spotifyHandler.api.setRepeat(newState[spotifyHandler.lastPlaybackStatus.repeat_state], {}, function (err, data) {
 				spotifyHandler.dom.repeatButton.disabled = false;
 				if (err) {
 					console.error(err);
 				}
 				else {
-					setTimeout(function() {
+					setTimeout(function () {
 						spotifyHandler.setCurrentlyPlaying();
 					}, 250);
 				}
 			});
 		});
 
-		spotifyHandler.dom.queuePage.addEventListener("scroll", function(event) {
+		spotifyHandler.dom.queuePage.addEventListener("scroll", function (event) {
 			if (event.target.offsetHeight + event.target.scrollTop + 1280 >= event.target.scrollHeight && spotifyHandler.fetchingQueue != true && spotifyHandler.queueOffset < spotifyHandler.queueTotal) {
 				console.log("Scrolled near the end of queue, fetching more tracks");
 				spotifyHandler.fetchQueueTracks(spotifyHandler.lastQueueType, spotifyHandler.lastQueueId, spotifyHandler.queueOffset);
 			}
 		});
 
-		spotifyHandler.dom.libraryPage.addEventListener("scroll", function(event) {
+		spotifyHandler.dom.libraryPage.addEventListener("scroll", function (event) {
 			if (event.target.offsetHeight + event.target.scrollTop + 1280 >= event.target.scrollHeight && spotifyHandler.fetchingPlaylists != true) {
 				console.log("Scrolled near the end of library, fetching more playlists");
 				spotifyHandler.fetchPlaylists(spotifyHandler.playlistsOffset);
 			}
 		});
 
-		spotifyHandler.dom.searchBar.addEventListener("input", function(event) {
+		spotifyHandler.dom.searchBar.addEventListener("input", function (event) {
 			spotifyHandler.search(event.target.value);
 		});
 
-		if ('mediaSession' in navigator)
-		{
+		if ('mediaSession' in navigator) {
 			navigator.mediaSession.metadata = new MediaMetadata({});
 			navigator.mediaSession.setActionHandler('play', spotifyHandler.api.play);
 			navigator.mediaSession.setActionHandler('pause', spotifyHandler.api.pause);
@@ -810,56 +871,105 @@ var spotifyHandler = {
 			navigator.mediaSession.playbackState = "none";
 		}
 
-		if (window.location.hash.length > 0)
-		{
-			var hash = {};
-			var tempHash = window.location.hash.substring(1).split("&");
-			window.location.hash = "";
-			for (var i = 0; i < tempHash.length; i++) {
-				hash[tempHash[i].split("=")[0]] = tempHash[i].split("=")[1];
-			}
-			if ("access_token" in hash && parseInt(hash["state"]) == state) {
-				if (getCookie("spat") != hash["access_token"]) {
-					setCookie("spat", hash["access_token"]);
-					spotifyHandler.expires = new Date().getTime() + (parseInt(hash["expires_in"]) * 1000);
-					setCookie("spex", spotifyHandler.expires);
-				}
-				else {
-					spotifyHandler.expires = parseInt(getCookie("spex"));
-				}
-				setInterval(spotifyHandler.checkAccessToken, 1000);
-				setInterval(spotifyHandler.refreshDevices, 5000);
-				setInterval(spotifyHandler.setCurrentlyPlaying, 1000);
-				setTimeout(function() {
-					setInterval(function() {
-						if (spotifyHandler.lastPlaybackStatus.is_playing) {
-							progressBar.setValue(((spotifyHandler.lastPlaybackStatus.progress_ms + 500) / spotifyHandler.lastPlaybackStatus.item.duration_ms) * 100);
-						}
-					}, 1000);
-				}, 500);
-				spotifyHandler.api.setAccessToken(hash["access_token"]);
-				pageHandler.showPage("playerpage");
-				spotifyHandler.setCurrentlyPlaying();
-				spotifyHandler.refreshDevices();
-				spotifyHandler.loadLibrary();
-			}
-			else if ("error" in hash && parseInt(hash["state"]) == state) {
-				if (hash["error"] == "access_denied") {
+		const urlParams = new URLSearchParams(window.location.search);
+		const code = urlParams.get('code');
+		const urlState = urlParams.get('state');
 
-				}
-				else {
-					alert("An error occurred connecting to your Spotify account: " + hash["error"]);
-				}
+		if (code && urlState == state) {
+			let codeVerifier = localStorage.getItem('code_verifier');
+			if (!codeVerifier) {
+				console.error("Code verifier not found");
+				alert("Something went wrong with the authentication. Please try again.");
 				pageHandler.showPage("signinpage");
+				return;
 			}
-			else {
-				alert("Something went wrong connecting your Spotify account. Please try again.");
-				pageHandler.showPage("signinpage");
-			}
+
+			let body = new URLSearchParams({
+				grant_type: 'authorization_code',
+				code: code,
+				redirect_uri: spotifyHandler.redirectUri,
+				client_id: spotifyHandler.clientId,
+				code_verifier: codeVerifier
+			});
+
+			fetch('https://accounts.spotify.com/api/token', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded'
+				},
+				body: body
+			})
+				.then(response => {
+					if (!response.ok) {
+						throw new Error('HTTP status ' + response.status);
+					}
+					return response.json();
+				})
+				.then(data => {
+					localStorage.removeItem('code_verifier');
+					setCookie("spat", data.access_token);
+					spotifyHandler.expires = new Date().getTime() + (data.expires_in * 1000);
+					setCookie("spex", spotifyHandler.expires);
+					if (data.refresh_token) {
+						setCookie("sprt", data.refresh_token);
+					}
+
+					// Clean URL
+					window.history.replaceState({}, document.title, "/");
+
+					// Start intervals and init logic (copied from original)
+					setInterval(spotifyHandler.checkAccessToken, 1000);
+					setInterval(spotifyHandler.refreshDevices, 5000);
+					setInterval(spotifyHandler.setCurrentlyPlaying, 1000);
+					setTimeout(function () {
+						setInterval(function () {
+							if (spotifyHandler.lastPlaybackStatus.is_playing) {
+								progressBar.setValue(((spotifyHandler.lastPlaybackStatus.progress_ms + 500) / spotifyHandler.lastPlaybackStatus.item.duration_ms) * 100);
+							}
+						}, 1000);
+					}, 500);
+					spotifyHandler.api.setAccessToken(data.access_token);
+					pageHandler.showPage("playerpage");
+					spotifyHandler.setCurrentlyPlaying();
+					spotifyHandler.refreshDevices();
+					spotifyHandler.loadLibrary();
+				})
+				.catch(error => {
+					console.error('Error:', error);
+					alert("Error exchanging code for token");
+					pageHandler.showPage("signinpage");
+				});
+		}
+		else if (urlParams.has('error')) {
+			alert("An error occurred connecting to your Spotify account: " + urlParams.get('error'));
+			pageHandler.showPage("signinpage");
 		}
 		else if (getCookie("spat") != null) {
-			console.log("No hash present, but we might be able to sign in automatically, since a previous access token was found.");
-			spotifyHandler.signIn();
+			console.log("No code present, but we might be able to sign in automatically, since a previous access token was found.");
+			// We can check if it's expired here or just let checkAccessToken handle it eventually, 
+			// but for now let's just use what we have.
+			// Note: If we had a refresh token we could refresh it here if expired.
+			// For now, restoring original optimistic behavior.
+			var accessToken = getCookie("spat");
+			var expires = parseInt(getCookie("spex"));
+
+			spotifyHandler.expires = expires;
+
+			setInterval(spotifyHandler.checkAccessToken, 1000);
+			setInterval(spotifyHandler.refreshDevices, 5000);
+			setInterval(spotifyHandler.setCurrentlyPlaying, 1000);
+			setTimeout(function () {
+				setInterval(function () {
+					if (spotifyHandler.lastPlaybackStatus.is_playing) {
+						progressBar.setValue(((spotifyHandler.lastPlaybackStatus.progress_ms + 500) / spotifyHandler.lastPlaybackStatus.item.duration_ms) * 100);
+					}
+				}, 1000);
+			}, 500);
+			spotifyHandler.api.setAccessToken(accessToken);
+			pageHandler.showPage("playerpage");
+			spotifyHandler.setCurrentlyPlaying();
+			spotifyHandler.refreshDevices();
+			spotifyHandler.loadLibrary();
 		}
 		else {
 			pageHandler.showPage('signinpage');
