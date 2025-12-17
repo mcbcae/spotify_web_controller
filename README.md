@@ -26,3 +26,6 @@ It's currently available at https://freekb.es/spotify/
 - liked & recently played songs overview
 - small overview of your top played artists and songs
 - media control notification
+
+
+Test.s
