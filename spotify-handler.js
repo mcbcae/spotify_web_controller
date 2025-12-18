@@ -67,9 +67,61 @@ var spotifyHandler = {
 	},
 
 	checkAccessToken: function () {
-		if ((new Date().getTime() + 25000) >= spotifyHandler.expires) {
-			console.warn("Spotify Access Token has expired! Refreshing page to refresh the access token...");
-			window.location.href = window.location.origin + window.location.pathname;
+		if ((new Date().getTime() + 60000) >= spotifyHandler.expires) { // Increased buffer to 60s
+			console.log("Spotify Access Token is expiring or expired. Refreshing...");
+			spotifyHandler.refreshToken();
+		}
+	},
+
+	refreshToken: async function () {
+		const refreshToken = getCookie("sprt");
+		if (!refreshToken) {
+			console.warn("No refresh token found. Redirecting to sign in.");
+			pageHandler.showPage("signinpage");
+			return;
+		}
+
+		const body = new URLSearchParams({
+			grant_type: 'refresh_token',
+			refresh_token: refreshToken,
+			client_id: spotifyHandler.clientId
+		});
+
+		try {
+			const response = await fetch('https://accounts.spotify.com/api/token', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded'
+				},
+				body: body
+			});
+
+			if (!response.ok) {
+				throw new Error('HTTP status ' + response.status);
+			}
+
+			const data = await response.json();
+
+			// Update cookies and state
+			setCookie("spat", data.access_token);
+			spotifyHandler.expires = new Date().getTime() + (data.expires_in * 1000);
+			setCookie("spex", spotifyHandler.expires);
+			if (data.refresh_token) { // Sometimes we get a new refresh token
+				setCookie("sprt", data.refresh_token);
+			}
+
+			spotifyHandler.api.setAccessToken(data.access_token);
+			console.log("Token refreshed successfully.");
+
+		} catch (error) {
+			console.error("Error refreshing token:", error);
+			// Only sign out if it's a fatal Auth error, but for now safe default
+			alert("Session expired. Please sign in again.");
+			// Clear cookies to prevent infinite loop
+			document.cookie = "spat=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+			document.cookie = "spex=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+			document.cookie = "sprt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+			pageHandler.showPage("signinpage");
 		}
 	},
 
@@ -945,31 +997,47 @@ var spotifyHandler = {
 			pageHandler.showPage("signinpage");
 		}
 		else if (getCookie("spat") != null) {
-			console.log("No code present, but we might be able to sign in automatically, since a previous access token was found.");
-			// We can check if it's expired here or just let checkAccessToken handle it eventually, 
-			// but for now let's just use what we have.
-			// Note: If we had a refresh token we could refresh it here if expired.
-			// For now, restoring original optimistic behavior.
+			console.log("Found existing access token.");
+
 			var accessToken = getCookie("spat");
 			var expires = parseInt(getCookie("spex"));
+			var refreshToken = getCookie("sprt");
 
 			spotifyHandler.expires = expires;
 
-			setInterval(spotifyHandler.checkAccessToken, 1000);
-			setInterval(spotifyHandler.refreshDevices, 5000);
-			setInterval(spotifyHandler.setCurrentlyPlaying, 1000);
-			setTimeout(function () {
-				setInterval(function () {
-					if (spotifyHandler.lastPlaybackStatus.is_playing) {
-						progressBar.setValue(((spotifyHandler.lastPlaybackStatus.progress_ms + 500) / spotifyHandler.lastPlaybackStatus.item.duration_ms) * 100);
-					}
-				}, 1000);
-			}, 500);
-			spotifyHandler.api.setAccessToken(accessToken);
-			pageHandler.showPage("playerpage");
-			spotifyHandler.setCurrentlyPlaying();
-			spotifyHandler.refreshDevices();
-			spotifyHandler.loadLibrary();
+			// Check validity immediately
+			if (new Date().getTime() >= expires) {
+				console.log("Token expired on load. Attempting refresh...");
+				if (refreshToken) {
+					spotifyHandler.refreshToken().then(() => {
+						// Continue init after refresh
+						initContinue();
+					});
+				} else {
+					pageHandler.showPage('signinpage');
+				}
+			} else {
+				spotifyHandler.api.setAccessToken(accessToken);
+				initContinue();
+			}
+
+			function initContinue() {
+				setInterval(spotifyHandler.checkAccessToken, 1000);
+				setInterval(spotifyHandler.refreshDevices, 5000);
+				setInterval(spotifyHandler.setCurrentlyPlaying, 1000);
+				setTimeout(function () {
+					setInterval(function () {
+						if (spotifyHandler.lastPlaybackStatus.is_playing) {
+							progressBar.setValue(((spotifyHandler.lastPlaybackStatus.progress_ms + 500) / spotifyHandler.lastPlaybackStatus.item.duration_ms) * 100);
+						}
+					}, 1000);
+				}, 500);
+
+				pageHandler.showPage("playerpage");
+				spotifyHandler.setCurrentlyPlaying();
+				spotifyHandler.refreshDevices();
+				spotifyHandler.loadLibrary();
+			}
 		}
 		else {
 			pageHandler.showPage('signinpage');
